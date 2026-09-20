@@ -1,0 +1,23 @@
+# Secrets — never commit these.
+.env
+.env.local
+
+# Virtualenv
+.venv/
+venv/
+
+# Build artifacts. dist/ is machine-specific: build_mcpb.sh bakes this
+# machine's absolute interpreter path into dist/manifest.json and vendors
+# platform-compiled wheels. It is never portable and must not be committed.
+dist/
+build/
+*.mcpb
+*.egg-info/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store

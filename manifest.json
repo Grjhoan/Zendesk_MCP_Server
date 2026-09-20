@@ -1,0 +1,139 @@
+{
+  "manifest_version": "0.3",
+  "name": "zendesk-admin",
+  "display_name": "Zendesk Admin",
+  "version": "0.1.0",
+  "description": "Zendesk administration: business-rule audits, backlog and SLA health, security review, and agent offboarding.",
+  "long_description": "Twelve focused tools instead of a wrapper around the whole API. Reads are annotated readOnly; the two writes (reassign tickets, suspend or change a user's role) are disabled by default and run as a dry run unless explicitly told otherwise. The Zendesk role of the token remains the real security boundary.",
+  "author": {
+    "name": "Jhoan Zabala",
+    "email": "jzabalacx@gmail.com",
+    "url": "https://jhoanzabala.com"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/server/main.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/server/lib",
+        "ZENDESK_SUBDOMAIN": "${user_config.subdomain}",
+        "ZENDESK_EMAIL": "${user_config.email}",
+        "ZENDESK_API_TOKEN": "${user_config.api_token}",
+        "ZENDESK_OAUTH_TOKEN": "${user_config.oauth_token}",
+        "ZENDESK_ALLOW_WRITES": "${user_config.allow_writes}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "whoami",
+      "description": "Verify the connection and show which account and role the server operates as."
+    },
+    {
+      "name": "audit_business_rules",
+      "description": "Triggers, automations and macros: finds inactive, unused, stale and duplicate rules."
+    },
+    {
+      "name": "list_ticket_fields",
+      "description": "Inventory of ticket fields, flagging inactive and custom ones."
+    },
+    {
+      "name": "list_sla_policies",
+      "description": "SLA policies with their targets by priority and metric."
+    },
+    {
+      "name": "backlog_health",
+      "description": "Counts by status and priority, unassigned tickets, and the most stalled ones."
+    },
+    {
+      "name": "agent_workload",
+      "description": "Distribution of open tickets per agent."
+    },
+    {
+      "name": "security_overview",
+      "description": "Admins, unused OAuth tokens and installed apps."
+    },
+    {
+      "name": "recent_admin_changes",
+      "description": "Configuration changes from the audit log. Requires the Enterprise plan."
+    },
+    {
+      "name": "find_user",
+      "description": "Find users by name, email or Zendesk search syntax."
+    },
+    {
+      "name": "offboarding_report",
+      "description": "Open tickets, groups and role for a departing agent. Read-only."
+    },
+    {
+      "name": "reassign_tickets",
+      "description": "Reassign an agent's open tickets to another agent. Dry run by default."
+    },
+    {
+      "name": "set_user_status",
+      "description": "Suspend, reactivate or change a user's role. Dry run by default."
+    }
+  ],
+  "user_config": {
+    "subdomain": {
+      "type": "string",
+      "title": "Zendesk subdomain",
+      "description": "Subdomain only. If you sign in at https://acme.zendesk.com, the value is: acme",
+      "required": true
+    },
+    "email": {
+      "type": "string",
+      "title": "Email of the API token owner",
+      "description": "Leave empty if you are using an OAuth token.",
+      "required": false,
+      "default": ""
+    },
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "Stored in the OS keychain, not in plain text. Zendesk has deprecated API tokens: prefer OAuth for shared use.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "oauth_token": {
+      "type": "string",
+      "title": "OAuth token (recommended alternative)",
+      "description": "If set, this takes precedence over the API token.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "allow_writes": {
+      "type": "boolean",
+      "title": "Allow writes",
+      "description": "Enables reassign_tickets and set_user_status. Even when enabled, both run as a dry run until called with dry_run=false.",
+      "default": false,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "runtimes": {
+      "python": ">=3.10,<4.0"
+    }
+  },
+  "keywords": [
+    "zendesk",
+    "helpdesk",
+    "admin",
+    "support",
+    "sla"
+  ],
+  "license": "MIT",
+  "homepage": "https://jhoanzabala.com",
+  "documentation": "https://github.com/Grjhoan/Zendesk_MCP_Server#readme",
+  "support": "https://github.com/Grjhoan/Zendesk_MCP_Server/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Grjhoan/Zendesk_MCP_Server"
+  }
+}

@@ -1,0 +1,29 @@
+[project]
+name = "zendesk-admin-mcp"
+version = "0.1.0"
+description = "Local MCP server for Zendesk administration: business-rule audits, backlog and SLA health, security review, and agent offboarding"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jhoan Zabala", email = "jzabalacx@gmail.com" }]
+keywords = ["zendesk", "mcp", "helpdesk", "admin", "support", "sla", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "mcp>=2.0,<3",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://jhoanzabala.com"
+Repository = "https://github.com/Grjhoan/Zendesk_MCP_Server"
+Issues = "https://github.com/Grjhoan/Zendesk_MCP_Server/issues"
+
+[tool.setuptools]
+py-modules = ["server", "zendesk_client"]
