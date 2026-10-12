@@ -2,9 +2,9 @@
 """zendesk-admin-mcp - MCP server for Zendesk administration tasks.
 
 Deliberately narrow in scope: instead of wrapping the hundreds of endpoints in
-the API, it exposes twelve tools that solve concrete admin tasks across four
-areas: business-rule auditing, backlog and SLA health, security, and user
-management / offboarding.
+the API, it exposes thirteen tools that solve concrete admin tasks across five
+areas: business-rule auditing, backlog and SLA health, security, user
+management / offboarding, and ticket search.
 
 Design principles:
   - Read-only by default. The two write tools live apart, require
@@ -17,6 +17,7 @@ Design principles:
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 from collections import Counter
@@ -27,7 +28,12 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from zendesk_client import ZendeskClient, ZendeskConfigError, ZendeskWriteDisabled
+from zendesk_client import (
+    ZendeskClient,
+    ZendeskConfigError,
+    ZendeskRateLimited,
+    ZendeskWriteDisabled,
+)
 
 
 def _load_dotenv() -> None:
@@ -56,7 +62,7 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
-mcp = MCPServer("zendesk-admin", version="0.1.0")
+mcp = MCPServer("zendesk-admin", version="0.2.0")
 
 # Annotations the MCP client can surface to the user before executing.
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
@@ -90,12 +96,66 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"error": message, **extra}
 
 
+_HTTP_HINTS = {
+    401: "Credentials rejected. Check the subdomain, email and token in the "
+         "server configuration, and that API token access is enabled in "
+         "Admin Center.",
+    403: "The token's user lacks permission for this, or the account's plan "
+         "does not include this feature.",
+    404: "The resource does not exist, or the endpoint is not available on "
+         "this plan.",
+    422: "Zendesk rejected the request parameters.",
+    429: "The account's per-minute request limit was exhausted.",
+}
+
+
+def friendly_errors(func):
+    """Turn network and HTTP failures into a readable result.
+
+    Without this, an exception reaches the MCP client as a bare "Error
+    executing tool" that says nothing. Diagnosing a 401 should not take
+    three calls.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return await func(*args, **kwargs)
+        except ZendeskConfigError as exc:
+            return _error(
+                str(exc),
+                hint="Set the missing variables in the server configuration.",
+            )
+        except ZendeskWriteDisabled as exc:
+            return _error(
+                str(exc),
+                hint="Writes are off by default. Even once enabled, the write "
+                "tools run as a dry run until called with dry_run=false.",
+            )
+        except ZendeskRateLimited as exc:
+            return _error(str(exc), hint=_HTTP_HINTS[429])
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            return _error(
+                f"Zendesk returned {status} on {exc.request.url.path}.",
+                hint=_HTTP_HINTS.get(status, "Unexpected response from Zendesk."),
+            )
+        except httpx.HTTPError as exc:
+            return _error(
+                f"Could not reach Zendesk: {type(exc).__name__}.",
+                hint="Check the subdomain and the network connection.",
+            )
+
+    return wrapper
+
+
 # ======================================================================
 # Connection
 # ======================================================================
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def whoami() -> dict[str, Any]:
     """Verify the Zendesk connection and show which account and role the server
     operates as. Use this first to confirm the credentials work."""
@@ -104,11 +164,22 @@ async def whoami() -> dict[str, Any]:
     except ZendeskConfigError as exc:
         return _error(str(exc))
 
+    # The diagnosis has to say WHAT the connection was attempted with, not just
+    # that it failed: otherwise a 401 cannot distinguish a wrong subdomain from
+    # an empty field from a bad credential. Never include the token itself.
+    configured = {
+        "subdomain": zd.subdomain,
+        "auth_mode": zd.auth_mode,
+        "email_set": bool(zd.email),
+        "token_length": zd.token_length,
+    }
+
     try:
         payload = await zd.get("/users/me")
     except httpx.HTTPStatusError as exc:
         return _error(
             f"Zendesk rejected the authentication ({exc.response.status_code}).",
+            configured=configured,
             hint="Check the subdomain and the token. If using an API token, the user "
             "must be the token owner and the account must have token access "
             "enabled in Admin Center.",
@@ -138,6 +209,7 @@ async def whoami() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def audit_business_rules(
     kind: str = "all",
     stale_days: int = 180,
@@ -221,6 +293,7 @@ async def audit_business_rules(
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def list_ticket_fields(include_inactive: bool = True) -> dict[str, Any]:
     """Inventory of ticket fields, flagging which are inactive and which are
     system fields. Useful before cleaning up forms."""
@@ -255,6 +328,7 @@ async def list_ticket_fields(include_inactive: bool = True) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def list_sla_policies() -> dict[str, Any]:
     """List the SLA policies with their targets by priority and metric."""
     zd = client()
@@ -293,6 +367,7 @@ async def list_sla_policies() -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def backlog_health(stale_days: int = 7, sample_size: int = 25) -> dict[str, Any]:
     """X-ray of the open backlog: counts by status and priority, plus the most
     stalled tickets. `stale_days` defines how many days without an update make
@@ -341,6 +416,7 @@ async def backlog_health(stale_days: int = 7, sample_size: int = 25) -> dict[str
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def agent_workload(max_tickets: int = 1000) -> dict[str, Any]:
     """Distribution of open tickets by assigned agent, heaviest load first.
     Shows where work is piling up."""
@@ -386,6 +462,7 @@ async def agent_workload(max_tickets: int = 1000) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def security_overview(unused_token_days: int = 90) -> dict[str, Any]:
     """Security overview of the account: who holds the admin role, which OAuth
     tokens exist and which have gone unused, and which apps are installed."""
@@ -466,6 +543,7 @@ async def security_overview(unused_token_days: int = 90) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def recent_admin_changes(
     days: int = 7,
     action: str | None = None,
@@ -543,6 +621,7 @@ async def recent_admin_changes(
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def find_user(query: str) -> dict[str, Any]:
     """Find users by name, email or any term of the Zendesk search syntax.
     Returns id, role and status."""
@@ -567,6 +646,7 @@ async def find_user(query: str) -> dict[str, Any]:
 
 
 @mcp.tool(annotations=READ_ONLY)
+@friendly_errors
 async def offboarding_report(user_id: int) -> dict[str, Any]:
     """Everything left hanging on an agent before deactivating them: assigned
     open tickets, the groups they belong to, role and last login. Read-only;
@@ -630,11 +710,203 @@ async def offboarding_report(user_id: int) -> dict[str, Any]:
 
 
 # ======================================================================
+# Area 5 - Ticket search
+# ======================================================================
+
+
+def _quote_if_needed(value: str) -> str:
+    """Wrap a value containing spaces in double quotes, as the search syntax
+    requires. Single words and already-quoted values are left alone."""
+    value = value.strip()
+    if not value or (value.startswith('"') and value.endswith('"')):
+        return value
+    return f'"{value}"' if " " in value else value
+
+
+def _phone_variants(phone: str) -> list[str]:
+    """Variants to try for a phone number.
+
+    Zendesk requires a leading + when searching by `phone:`. Since it is easy
+    to leave out, the value is tried as given and then with the + prepended.
+    """
+    cleaned = phone.strip()
+    variants = [cleaned]
+    with_plus = "+" + cleaned.lstrip("+")
+    if with_plus != cleaned:
+        variants.append(with_plus)
+    return variants
+
+
+def _build_ticket_query(
+    email: str | None = None,
+    subject: str | None = None,
+    requester_ids: list[int] | None = None,
+) -> str:
+    """Build the ticket search query from the requested filters.
+
+    Pure and network-free, so it can be tested on its own.
+    """
+    parts = ["type:ticket"]
+    if email:
+        parts.append(f"requester:{_quote_if_needed(email)}")
+    if subject:
+        parts.append(f"subject:{_quote_if_needed(subject)}")
+    if requester_ids:
+        if len(requester_ids) == 1:
+            parts.append(f"requester:{requester_ids[0]}")
+        else:
+            ors = " ".join(f"requester:{i}" for i in requester_ids)
+            parts.append(f"({ors})")
+    return " ".join(parts)
+
+
+def _ticket_summary(ticket: dict[str, Any], subdomain: str) -> dict[str, Any]:
+    return {
+        "id": ticket.get("id"),
+        "subject": ticket.get("subject"),
+        "status": ticket.get("status"),
+        "priority": ticket.get("priority"),
+        "requester_id": ticket.get("requester_id"),
+        "assignee_id": ticket.get("assignee_id"),
+        "created_at": ticket.get("created_at"),
+        "updated_at": ticket.get("updated_at"),
+        "days_since_update": _days_since(ticket.get("updated_at")),
+        "url": f"https://{subdomain}.zendesk.com/agent/tickets/{ticket.get('id')}",
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+@friendly_errors
+async def find_tickets(
+    ticket_id: int | None = None,
+    email: str | None = None,
+    subject: str | None = None,
+    phone: str | None = None,
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """Find tickets by ticket id, requester email, subject or phone number.
+
+    Provide at least one of the four. `ticket_id` fetches that ticket directly
+    and excludes the others. `email`, `subject` and `phone` can be combined and
+    are all applied together. The phone is the one on the user's profile, not a
+    ticket field, so the user is located first and then their tickets.
+    """
+    criteria = [
+        name
+        for name, value in (("email", email), ("subject", subject), ("phone", phone))
+        if value
+    ]
+    if ticket_id is None and not criteria:
+        return _error(
+            "Provide at least one criterion: ticket_id, email, subject or phone."
+        )
+    max_results = max(max_results, 1)
+
+    zd = client()
+
+    # By id: fetch the ticket directly. There is no ticket-id search keyword,
+    # and the search index lags behind for recently created tickets; the
+    # direct endpoint always answers and also returns the description.
+    if ticket_id is not None:
+        try:
+            payload = await zd.get(f"/tickets/{ticket_id}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return _error(
+                    f"Ticket {ticket_id} does not exist, or it was deleted.",
+                    searched_by="ticket_id",
+                )
+            raise
+        ticket = payload.get("ticket") or {}
+        result: dict[str, Any] = {
+            "searched_by": "ticket_id",
+            "count": 1,
+            "tickets": [_ticket_summary(ticket, zd.subdomain)],
+            "description": ticket.get("description"),
+        }
+        if criteria:
+            result["note"] = (
+                f"ticket_id is exclusive, so {', '.join(criteria)} "
+                f"{'was' if len(criteria) == 1 else 'were'} ignored."
+            )
+        return result
+
+    notes: list[str] = []
+    requester_ids: list[int] = []
+
+    # The phone lives on the user. Resolve it to user ids first.
+    if phone:
+        variants = _phone_variants(phone)
+        matched_users: list[dict[str, Any]] = []
+        used_variant = None
+
+        for variant in variants:
+            users = await zd.search_export(
+                f"type:user phone:{_quote_if_needed(variant)}",
+                filter_type="user",
+                max_items=50,
+            )
+            if users:
+                matched_users = users
+                used_variant = variant
+                break
+
+        if not matched_users:
+            return {
+                "searched_by": criteria,
+                "count": 0,
+                "tickets": [],
+                "note": (
+                    f"No user has the phone number {phone} (tried "
+                    + " and ".join(f"'{v}'" for v in variants)
+                    + "). This is different from a user with no tickets. "
+                    "Zendesk requires a leading + on phone searches; also check "
+                    "that the number is stored on the user's profile."
+                ),
+            }
+
+        requester_ids = [u["id"] for u in matched_users if u.get("id")]
+        notes.append(
+            f"Phone matched as '{used_variant}' on {len(matched_users)} user(s): "
+            + ", ".join(
+                f"{u.get('name')} (id {u.get('id')})" for u in matched_users[:5]
+            )
+            + "."
+        )
+
+    query = _build_ticket_query(
+        email=email, subject=subject, requester_ids=requester_ids
+    )
+    tickets = await zd.search_export(
+        query, filter_type="ticket", max_items=max_results
+    )
+
+    if not tickets:
+        notes.append(
+            "No results. Email matching is exact (no wildcards), and the search "
+            "index can take a few minutes to include newly created tickets, so "
+            "zero results is not proof that none exist."
+        )
+
+    result = {
+        "searched_by": criteria,
+        "query": query,
+        "count": len(tickets),
+        "truncated": len(tickets) >= max_results,
+        "tickets": [_ticket_summary(t, zd.subdomain) for t in tickets],
+    }
+    if notes:
+        result["note"] = " ".join(notes)
+    return result
+
+
+# ======================================================================
 # Writes - require ZENDESK_ALLOW_WRITES=true
 # ======================================================================
 
 
 @mcp.tool(annotations=MUTATING)
+@friendly_errors
 async def reassign_tickets(
     from_user_id: int,
     to_user_id: int,
@@ -674,19 +946,16 @@ async def reassign_tickets(
         return {**preview, "dry_run": False, "applied": 0}
 
     jobs = []
-    try:
-        # update_many accepts at most 100 ids per call.
-        for i in range(0, len(ticket_ids), 100):
-            chunk = ticket_ids[i : i + 100]
-            result = await zd.put(
-                "/tickets/update_many",
-                {"ticket": {"assignee_id": to_user_id}},
-                params={"ids": ",".join(str(t) for t in chunk)},
-            )
-            status = result.get("job_status") or {}
-            jobs.append({"job_id": status.get("id"), "tickets": len(chunk)})
-    except ZendeskWriteDisabled as exc:
-        return _error(str(exc))
+    # update_many accepts at most 100 ids per call.
+    for i in range(0, len(ticket_ids), 100):
+        chunk = ticket_ids[i : i + 100]
+        result = await zd.put(
+            "/tickets/update_many",
+            {"ticket": {"assignee_id": to_user_id}},
+            params={"ids": ",".join(str(t) for t in chunk)},
+        )
+        status = result.get("job_status") or {}
+        jobs.append({"job_id": status.get("id"), "tickets": len(chunk)})
 
     return {
         **preview,
@@ -698,6 +967,7 @@ async def reassign_tickets(
 
 
 @mcp.tool(annotations=MUTATING)
+@friendly_errors
 async def set_user_status(
     user_id: int,
     suspended: bool | None = None,
@@ -751,10 +1021,7 @@ async def set_user_status(
     if not changes:
         return {**summary, "dry_run": False, "applied": False}
 
-    try:
-        result = await zd.put(f"/users/{user_id}", {"user": changes})
-    except ZendeskWriteDisabled as exc:
-        return _error(str(exc))
+    result = await zd.put(f"/users/{user_id}", {"user": changes})
 
     updated = result.get("user") or {}
     return {
@@ -769,7 +1036,7 @@ def main() -> None:
     missing = [
         var
         for var in ("ZENDESK_SUBDOMAIN",)
-        if not os.environ.get(var)
+        if not ZendeskClient._env(var)
     ]
     if missing:
         # To stderr, never stdout: on the stdio transport, stdout carries the

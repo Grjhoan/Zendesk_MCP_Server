@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "zendesk-admin",
   "display_name": "Zendesk Admin",
-  "version": "0.1.0",
-  "description": "Zendesk administration: business-rule audits, backlog and SLA health, security review, and agent offboarding.",
-  "long_description": "Twelve focused tools instead of a wrapper around the whole API. Reads are annotated readOnly; the two writes (reassign tickets, suspend or change a user's role) are disabled by default and run as a dry run unless explicitly told otherwise. The Zendesk role of the token remains the real security boundary.",
+  "version": "0.2.0",
+  "description": "Zendesk administration: ticket search, business-rule audits, backlog and SLA health, security review, and agent offboarding.",
+  "long_description": "Thirteen focused tools instead of a wrapper around the whole API. Reads are annotated readOnly; the two writes (reassign tickets, suspend or change a user's role) are disabled by default and run as a dry run unless explicitly told otherwise. The Zendesk role of the token remains the real security boundary.",
   "author": {
     "name": "Jhoan Zabala",
     "email": "jzabalacx@gmail.com",
@@ -76,6 +76,10 @@
     {
       "name": "set_user_status",
       "description": "Suspend, reactivate or change a user's role. Dry run by default."
+    },
+    {
+      "name": "find_tickets",
+      "description": "Find tickets by ticket id, requester email, subject or phone number."
     }
   ],
   "user_config": {

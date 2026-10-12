@@ -31,6 +31,10 @@ class ZendeskWriteDisabled(RuntimeError):
     """A write was attempted without explicitly enabling writes."""
 
 
+class ZendeskRateLimited(RuntimeError):
+    """Retries on 429 responses were exhausted."""
+
+
 class ZendeskClient:
     def __init__(
         self,
@@ -55,10 +59,14 @@ class ZendeskClient:
         if oauth_token:
             headers = {"Authorization": f"Bearer {oauth_token}"}
             self.auth_mode = "oauth"
+            self.email = None
+            self.token_length = len(oauth_token)
         elif email and api_token:
             raw = f"{email}/token:{api_token}".encode()
             headers = {"Authorization": "Basic " + base64.b64encode(raw).decode()}
             self.auth_mode = "api_token"
+            self.email = email
+            self.token_length = len(api_token)
         else:
             raise ZendeskConfigError(
                 "Set ZENDESK_OAUTH_TOKEN, or else ZENDESK_EMAIL together with "
@@ -72,14 +80,28 @@ class ZendeskClient:
             base_url=self.base_url, headers=headers, timeout=timeout
         )
 
+    @staticmethod
+    def _env(name: str) -> str | None:
+        """Read a variable, treating anything that is not a real value as absent.
+
+        When an optional field in the .mcpb bundle is left blank, substitution
+        can leave the literal `${user_config.x}` in the environment. If that
+        were taken as a token, the server would authenticate with garbage and
+        Zendesk would answer 401 with no further explanation.
+        """
+        value = (os.environ.get(name) or "").strip()
+        if value.startswith("${") and value.endswith("}"):
+            return None
+        return value or None
+
     @classmethod
     def from_env(cls) -> "ZendeskClient":
         return cls(
-            subdomain=os.environ.get("ZENDESK_SUBDOMAIN", ""),
-            email=os.environ.get("ZENDESK_EMAIL"),
-            api_token=os.environ.get("ZENDESK_API_TOKEN"),
-            oauth_token=os.environ.get("ZENDESK_OAUTH_TOKEN"),
-            allow_writes=os.environ.get("ZENDESK_ALLOW_WRITES", "").lower()
+            subdomain=cls._env("ZENDESK_SUBDOMAIN") or "",
+            email=cls._env("ZENDESK_EMAIL"),
+            api_token=cls._env("ZENDESK_API_TOKEN"),
+            oauth_token=cls._env("ZENDESK_OAUTH_TOKEN"),
+            allow_writes=(cls._env("ZENDESK_ALLOW_WRITES") or "").lower()
             in ("1", "true", "yes"),
         )
 
@@ -126,9 +148,9 @@ class ZendeskClient:
                 return {}
             return response.json()
 
-        raise RuntimeError(
+        raise ZendeskRateLimited(
             f"Zendesk returned 429 on {MAX_RETRIES_ON_429} consecutive attempts for "
-            f"{method} {path}."
+            f"{method} {path}. Wait a minute and try again."
         ) from last_error
 
     async def get(

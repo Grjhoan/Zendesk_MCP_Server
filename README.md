@@ -5,7 +5,7 @@ work. Zendesk adopted MCP on the client side — its agentic AI consumes externa
 servers — but never shipped a server of its own that a host application could
 use. This fills that gap, with a deliberately narrow scope.
 
-It does not wrap the whole API. It exposes **12 tools** covering four concrete
+It does not wrap the whole API. It exposes **13 tools** covering five concrete
 admin jobs, because a server with 200 tools floods the context window and makes
 the model choose worse.
 
@@ -13,6 +13,7 @@ the model choose worse.
 You: "Which triggers haven't fired in the last 30 days?"
      "Who has the heaviest open backlog right now?"
      "Maria is leaving on Friday — what's still assigned to her?"
+     "Find the tickets from the customer calling from +57 300 123 4567."
 ```
 
 - [Purpose](#purpose)
@@ -48,7 +49,13 @@ model can reason about the answer instead of drowning in it.
 
 | Tool | What it does |
 |---|---|
-| `whoami` | Verifies credentials and shows which account and role the server operates as. |
+| `whoami` | Verifies credentials and shows which account and role the server operates as. On an auth failure, reports what it tried to connect with. |
+
+### Ticket search
+
+| Tool | What it does |
+|---|---|
+| `find_tickets` | Finds tickets by ticket id, requester email, subject or phone number. Email, subject and phone can be combined; ticket id is exclusive. Each result links straight to the agent interface. |
 
 ### Business-rule auditing
 
@@ -155,7 +162,9 @@ then; Zendesk will not show it again.
 | `ZENDESK_EMAIL` + `ZENDESK_API_TOKEN` | One of the two | Email of the token owner, and the token. |
 | `ZENDESK_ALLOW_WRITES` | No | `true` enables the two write tools. Off by default. |
 
-If both are set, `ZENDESK_OAUTH_TOKEN` wins.
+If both are set, `ZENDESK_OAUTH_TOKEN` wins. A value left as an unsubstituted
+placeholder such as `${user_config.oauth_token}` (which an `.mcpb` bundle can
+leave behind for a blank optional field) is treated as unset.
 
 ## Connecting it
 
@@ -232,11 +241,13 @@ The server speaks MCP over **stdio**. Point your client at
 ## Verification
 
 ```bash
-python tests/test_client.py      # HTTP layer against a mock transport
-python tests/test_handshake.py   # real MCP handshake and tool listing
+python tests/test_client.py        # HTTP layer against a mock transport
+python tests/test_search_query.py  # find_tickets query building
+python tests/test_errors.py        # failures come back readable; whoami never leaks the token
+python tests/test_handshake.py     # real MCP handshake and tool listing
 ```
 
-Both run without credentials or network access. After that, with credentials in
+All four run without credentials or network access. After that, with credentials in
 place:
 
 ```bash
@@ -263,20 +274,35 @@ connection and role are what you expect.
 - **Local only.** stdio transport, one operator, one set of credentials. There
   is no multi-user HTTP transport yet.
 - **No caching.** Repeated audits spend fresh rate-limit quota each run.
+- **Ticket search follows the search index.** Email matching in `find_tickets`
+  is exact (no wildcards), and newly created tickets can take a few minutes to
+  appear, so zero results is not proof of absence. Searching by `ticket_id`
+  bypasses the index and always answers.
 - **`usage_30d` is not universal.** Zendesk reports it for triggers and macros
   but not automations, where it comes back null.
 
 ## Troubleshooting
 
+No tool raises on a failed call. HTTP errors (401, 403, 404, 422, 429 and any
+other status), network errors, missing configuration and blocked writes all come
+back as a result with an `error` message and a `hint`, so the MCP client shows
+what went wrong instead of a bare "Error executing tool".
+
+When `whoami` hits an auth failure it also returns a `configured` block — the
+subdomain, the auth mode (`api_token` or `oauth`), whether an email is set, and
+the token length. The token itself is never included. That is usually enough to
+tell a wrong subdomain from an empty field from a bad credential.
+
 | Symptom | Likely cause |
 |---|---|
-| `401` from `whoami` | Wrong subdomain, email or token — or *Token access* is disabled in Admin Center. The email must be the token owner's. |
+| `401` from `whoami` | Wrong subdomain, email or token — or *Token access* is disabled in Admin Center. The email must be the token owner's. Check the `configured` block in the response. |
 | `403` on a specific tool | The token's role lacks permission for that endpoint. `security_overview` needs admin. |
 | `404` on SLA or audit-log tools | Your plan does not include that feature. |
 | Write tool refuses to run | `ZENDESK_ALLOW_WRITES` is not `true`. Once it is, you still need `dry_run=false` to actually apply. |
 | Server does not appear in the client | Non-absolute paths in the config, or the client was not restarted. |
 | Extension installs but will not start | The `.mcpb` was built on a different machine or with a different interpreter. Rebuild with `./build_mcpb.sh`. |
-| Repeated `429` | Rate limited. The client retries up to 4 times honouring `Retry-After`; lower `max_items` on the heavy tools. |
+| Repeated `429` | Rate limited. The client retries up to 4 times honouring `Retry-After`, then reports it; wait a minute and lower `max_items` on the heavy tools. |
+| `find_tickets` finds no user for a phone | The number is not on any user's profile. The tool already retries with a leading `+`, which Zendesk requires. |
 
 ## Implementation notes
 
@@ -290,6 +316,14 @@ Verified against the official Zendesk documentation:
   retries and a 60-second ceiling per wait.
 - **Search**: `/search/export` rather than `/search`, because the latter caps at
   1,000 total results. The export cursor expires after one hour.
+- **Ticket search**: `requester:` accepts an email address or a user id, and
+  multi-word subjects are quoted (`subject:"cannot log in"`). Ticket id has no
+  search keyword, so `find_tickets` fetches `/tickets/{id}` directly, which
+  also avoids index lag on new tickets. Phone is a **user** property, not a
+  ticket one: it resolves through `type:user phone:+...` first, then searches
+  tickets by `requester:<user_id>`, ORing several matching users together.
+  Zendesk requires the leading `+`, so the value is tried as given and then
+  with `+` prepended.
 - **Bulk writes**: `update_many` accepts 100 ids per call and processes
   asynchronously via `job_status`.
 
@@ -298,7 +332,7 @@ The Python MCP SDK is on 2.x, where `FastMCP` was renamed `MCPServer`.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run both test suites before
+Issues and pull requests are welcome. Please run all the test suites before
 submitting, and never commit a `.env`, a built `dist/`, or a `.mcpb` bundle.
 
 Ideas that would push this further:
